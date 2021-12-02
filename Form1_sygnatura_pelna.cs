@@ -94,10 +94,10 @@ namespace SW_T7
 
             usrednianie_wykresu();
 
-            //Dodatkowo wylistować wartośc Min i Max z tabela_promieni
-            //Odnaleźć tabelę w której przechowywane są usrednione wartości
-            //sygnatury i wypisać przykładową wartośc z tej tabeli
             listView1.Items.Add("Punkt kliknięcia: " + me.Location.ToString());
+            listView1.Items.Add("Minimum: " + tabela_promieni.Min());
+            listView1.Items.Add("Maksimum: " + tabela_promieni.Max());
+            listView1.Items.Add("Wartość średnia: " + tabela_wartosci_srednich[1]);
         }
 
         private void pictureBox1_MouseMove(object sender, MouseEventArgs e)
@@ -642,10 +642,18 @@ namespace SW_T7
 
         private Bitmap get_image_bitmap_from_file(string path, ref Image<Bgr, byte> Data)
         {
-            Mat temp = CvInvoke.Imread(path);
-            CvInvoke.Resize(temp, temp, desired_image_size);
-            Data = temp.ToImage<Bgr, byte>();
-            return Data.Bitmap;
+            try
+            {
+                Mat temp = CvInvoke.Imread(path);
+                CvInvoke.Resize(temp, temp, desired_image_size);
+                Data = temp.ToImage<Bgr, byte>();
+                return Data.Bitmap;
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Podana ścieżka jest nieprawidłowa");
+                return null;
+            }
         }
 
 

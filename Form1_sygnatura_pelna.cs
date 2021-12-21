@@ -7,7 +7,6 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 using System.Windows.Forms;
-
 using Emgu.CV;
 using Emgu.CV.Structure;
 using System.Threading;
@@ -20,23 +19,35 @@ namespace SW_T7
         private delegate double Filtr(double[] data, FilterParams param);
         private enum TrybRysowania { NAD_KRZYWA, TYLKO_DANE, TYLKO_KRZYWA }
         //Zmienne o typach pochodzących z powyższych deklaracji lub bibliotek zewnętrznych
-        private Image<Bgr, byte> image_PB1, image_PB2, image_PB3;
+        private Image<Bgr, byte> image_PB1, image_PB2, image_PB3, image_copy;
         private MCvScalar kolor_start, kolor_stop;
         private FilterParams parametry_filtru;
         private Filtr wybrany_filtr;
         //Zmienne o typach dostępnych w C#
         private Random rnd = new Random();
         private Size desired_image_size;
-
         private int liczba_promieni, opoznienie_rysowania, kat_poczatkowy;
-
         private double margines_na_tekst = 40;
         private double[] tabela_promieni;
         private double[] tabela_wartosci_srednich;
-
+        private Point srodek_ciezkosci;
         bool draw_example_option_selector = false;
         bool draw_example_abort_signal = false;
-
+        Queue<Point> pix_tlace = new Queue<Point>();
+        Queue<Point> pix_palace = new Queue<Point>();
+        Queue<Point> pix_nadpalone = new Queue<Point>();
+        Queue<Point> pix_wypalone = new Queue<Point>();
+        private MCvScalar aktualnie_klikniety = new MCvScalar(0, 0, 0);
+        private MCvScalar cecha_palnosci = new MCvScalar(0xFF, 0xFF, 0xFF);
+        private MCvScalar cecha_nadpalenia = new MCvScalar(0, 0, 0);
+        private MCvScalar kolor_tlenia = new MCvScalar(51, 153, 255);
+        private MCvScalar kolor_palenia = new MCvScalar(0, 0, 204);
+        private MCvScalar kolor_nadpalenia = new MCvScalar(51, 204, 51);
+        private MCvScalar kolor_wypalenia = new MCvScalar(100, 100, 100);
+        private MCvScalar aktualny_kolor_wypalenia = new MCvScalar(100, 100, 100);
+        private bool skos = true;
+        private bool cecha_dowolna = true;
+        private int nr_pozaru = 0;
 
         public Form1_sygnatura_pelna()
         {
@@ -47,6 +58,7 @@ namespace SW_T7
             image_PB1 = new Image<Bgr, byte>(desired_image_size);
             image_PB2 = new Image<Bgr, byte>(desired_image_size);
             image_PB3 = new Image<Bgr, byte>(pictureBox3.Size);
+            image_copy = new Image<Bgr, byte> (desired_image_size);
 
             //Kolor start i stop - wykorzystywane do rysowania przykładowych promieni
             kolor_start = new MCvScalar(0, 255, 0);
@@ -88,16 +100,44 @@ namespace SW_T7
             //Rysuje sygnature w miejscu klikniecia
             MouseEventArgs me = e as MouseEventArgs;
 
-            tabela_promieni = sygnatura_radialna(me.Location);
+            // Segmentacja i mechanika
+            czysc_obraz(image_PB2, pictureBox2);
+            int X, Y;
+            byte[,,] temp = image_PB1.Data;
+            byte[,,] copy = image_PB1.Data;
+            X = Convert.ToInt32(me.X);
+            Y = Convert.ToInt32(me.Y);
+
+            if (Sprawdz_czy_cecha_palnosci(temp[Y, X, 0], temp[Y, X, 1], temp[Y, X, 2]))
+            {
+                pix_tlace.Enqueue(new Point(X, Y));
+                temp[Y, X, 0] = (byte)kolor_tlenia.V0;
+                temp[Y, X, 1] = (byte)kolor_tlenia.V1;
+                temp[Y, X, 2] = (byte)kolor_tlenia.V2;
+            }
+
+            image_PB1.Data = temp;
+
+            Cykl_Pozaru();
+            Narysuj_wybrany_obiekt(0);
+            Mechanika();
+            czysc_obraz(image_PB2, pictureBox2);
+
+            // Sygnatura radialna
+            tabela_promieni = sygnatura_radialna(srodek_ciezkosci);
             czysc_obraz(image_PB3, pictureBox3);
             namaluj_dane_z_tabeli(tabela_promieni, null, new MCvScalar(255, 0, 0), TrybRysowania.TYLKO_DANE);
 
             usrednianie_wykresu();
-
             listView1.Items.Add("Punkt kliknięcia: " + me.Location.ToString());
             listView1.Items.Add("Minimum: " + tabela_promieni.Min());
             listView1.Items.Add("Maksimum: " + tabela_promieni.Max());
             listView1.Items.Add("Wartość średnia: " + tabela_wartosci_srednich[1]);
+            listView1.Items.Add("Środek ciężkości: " + srodek_ciezkosci.X + ", " + srodek_ciezkosci.Y);
+
+            czysc_obraz(image_PB1, pictureBox1);
+            image_PB1.Data = copy;
+            pictureBox1.Image = image_PB1.Bitmap;
         }
 
         private void pictureBox1_MouseMove(object sender, MouseEventArgs e)
@@ -218,8 +258,239 @@ namespace SW_T7
             czysc_obraz(image_PB3, pictureBox3);
         }
 
+        #region Segmentacja i mechanika
 
+        private void Cykl_Pozaru()
+        {
+            nr_pozaru++;
+            do
+            {
+                Krok_Pozaru();
+            } while (pix_tlace.Count > 0);
+        }
 
+        private void Krok_Pozaru()
+        {
+            byte[,,] temp = image_PB1.Data;
+
+            Tlace_do_palacych(temp);
+
+            foreach (Point pix in pix_palace)
+            {
+                Tlenie_od_palacego(temp, pix);
+            }
+
+            foreach (Point pix in pix_palace)
+            {
+                Nadpalenie_palacego(temp, pix);
+            }
+
+            Wypalenie_palacego(temp);
+
+            image_PB1.Data = temp;
+            pictureBox1.Image = image_PB1.Bitmap;
+            Application.DoEvents();
+        }
+
+        private void Tlace_do_palacych(byte[,,] temp)
+        {
+            while (pix_tlace.Count > 0)
+            {
+                Point p = pix_tlace.Dequeue();
+                pix_palace.Enqueue(p);
+                temp[p.Y, p.X, 0] = (byte)kolor_palenia.V0;
+                temp[p.Y, p.X, 1] = (byte)kolor_palenia.V1;
+                temp[p.Y, p.X, 2] = (byte)kolor_palenia.V2;
+            }
+        }
+
+        private void Tlenie_od_palacego(byte[,,] temp, Point pix_in)
+        {
+            if (Czy_piksel_w_zakresie(pix_in))
+            {
+                Point[] sasiedzi = Wylicz_wspolrzedne_sasiednich_pikseli(pix_in);
+                foreach (Point p in sasiedzi)
+                {
+                    if (Sprawdz_czy_cecha_palnosci(temp[p.Y, p.X, 0], temp[p.Y, p.X, 1], temp[p.Y, p.X, 2]))
+                    {
+                        pix_tlace.Enqueue(new Point(p.X, p.Y));
+                        temp[p.Y, p.X, 0] = (byte)kolor_tlenia.V0;
+                        temp[p.Y, p.X, 1] = (byte)kolor_tlenia.V1;
+                        temp[p.Y, p.X, 2] = (byte)kolor_tlenia.V2;
+                    }
+                }
+            }
+        }
+
+        private void Nadpalenie_palacego(byte[,,] temp, Point pix_in)
+        {
+            if (Czy_piksel_w_zakresie(pix_in))
+            {
+                Point[] sasiedzi = Wylicz_wspolrzedne_sasiednich_pikseli(pix_in);
+                bool nalezy_nadpalic = false;
+                foreach (Point p in sasiedzi)
+                {
+                    if (cecha_dowolna)
+                        nalezy_nadpalic = Sprawdz_czy_jakiekolwiek_nadpalenie(temp[p.Y, p.X, 0], temp[p.Y, p.X, 1], temp[p.Y, p.X, 2]);
+                    else
+                        nalezy_nadpalic = Sprawdz_czy_cecha_nadpalenia(temp[p.Y, p.X, 0], temp[p.Y, p.X, 1], temp[p.Y, p.X, 2]);
+                    if (nalezy_nadpalic)
+                    {
+                        pix_nadpalone.Enqueue(new Point(p.X, p.Y));
+                        temp[p.Y, p.X, 0] = (byte)kolor_nadpalenia.V0;
+                        temp[p.Y, p.X, 1] = (byte)kolor_nadpalenia.V1;
+                        temp[p.Y, p.X, 2] = (byte)kolor_nadpalenia.V2;
+                    }
+                }
+            }
+        }
+
+        private void Wypalenie_palacego(byte[,,] temp)
+        {
+            while (pix_palace.Count > 0)
+            {
+                Point p = pix_palace.Dequeue();
+                pix_wypalone.Enqueue(p);
+                temp[p.Y, p.X, 0] = (byte)(aktualny_kolor_wypalenia.V0);
+                temp[p.Y, p.X, 1] = (byte)(aktualny_kolor_wypalenia.V1);
+                temp[p.Y, p.X, 2] = (byte)(aktualny_kolor_wypalenia.V2);
+            }
+        }
+
+        private Point[] Wylicz_wspolrzedne_sasiednich_pikseli(Point pix_in)
+        {
+            List<Point> sasiedzi = new List<Point>();
+            sasiedzi.Add(new Point(pix_in.X - 1, pix_in.Y));
+            sasiedzi.Add(new Point(pix_in.X + 1, pix_in.Y));
+            sasiedzi.Add(new Point(pix_in.X, pix_in.Y - 1));
+            sasiedzi.Add(new Point(pix_in.X, pix_in.Y + 1));
+            if (skos)
+            {
+                sasiedzi.Add(new Point(pix_in.X - 1, pix_in.Y - 1));
+                sasiedzi.Add(new Point(pix_in.X + 1, pix_in.Y + 1));
+                sasiedzi.Add(new Point(pix_in.X - 1, pix_in.Y + 1));
+                sasiedzi.Add(new Point(pix_in.X + 1, pix_in.Y - 1));
+            }
+            return sasiedzi.ToArray();
+        }
+
+        private bool Czy_piksel_w_zakresie(Point pix_in)
+        {
+            int max_W, max_H;
+            max_W = desired_image_size.Width - 1;
+            max_H = desired_image_size.Height - 1;
+            if (pix_in.X > 0 && pix_in.X < max_W && pix_in.Y > 0 && pix_in.Y < max_H)
+                return true;
+            else
+                return false;
+        }
+
+        private bool Sprawdz_czy_cecha_palnosci(byte B, byte G, byte R)
+        {
+            if (B == cecha_palnosci.V0 && G == cecha_palnosci.V1 && R == cecha_palnosci.V2)
+                return true;
+            else
+                return false;
+        }
+
+        private bool Sprawdz_czy_cecha_nadpalenia(byte B, byte G, byte R)
+        {
+            if (B == cecha_nadpalenia.V0 && G == cecha_nadpalenia.V1 && R == cecha_nadpalenia.V2)
+                return true;
+            else
+                return false;
+        }
+
+        private bool Sprawdz_czy_jakiekolwiek_nadpalenie(byte B, byte G, byte R)
+        {
+            if (B == cecha_palnosci.V0 && G == cecha_palnosci.V1 && R == cecha_palnosci.V2)
+                return false;
+            else if (B == cecha_nadpalenia.V0 && G == cecha_nadpalenia.V1 && R == cecha_nadpalenia.V2)
+                return true;
+            else if (B == kolor_tlenia.V0 && G == kolor_tlenia.V1 && R == kolor_tlenia.V2)
+                return false;
+            else if (B == kolor_nadpalenia.V0 && G == kolor_nadpalenia.V1 && R == kolor_nadpalenia.V2)
+                return false;
+            else if (B == kolor_palenia.V0 && G == kolor_palenia.V1 && R == kolor_palenia.V2)
+                return false;
+            else if (B == aktualny_kolor_wypalenia.V0 && G == aktualny_kolor_wypalenia.V1 && R == aktualny_kolor_wypalenia.V2)
+                return false;
+            else
+                return true;
+        }
+
+        private void Mechanika()
+        {
+            //Reczne liczenie
+            double F, Sx, Sy, x0, y0;
+            double Jx, Jy, Jxy;
+            F = Sx = Sy =  Jx = Jy = Jxy = 0;
+
+            //Odciecie ewentualnego stykania sie z krawedzia obrazu
+            CvInvoke.Rectangle(image_PB2, new Rectangle(0, 0, desired_image_size.Width, desired_image_size.Height), new MCvScalar(0, 0, 0), 2);
+            pictureBox2.Image = image_PB2.Bitmap;
+            Application.DoEvents();
+
+            //Wyliczenie momentow 1 i 2 stopnia
+            byte[,,] temp = image_PB2.Data;
+            for (int X = 0; X < desired_image_size.Width; X++)
+            {
+                for (int Y = 0; Y < desired_image_size.Height; Y++)
+                {
+                    if (temp[Y, X, 0] == 0xFF && temp[Y, X, 1] == 0xFF && temp[Y, X, 2] == 0xFF)
+                    {
+                        F = F + 1;
+                        Sx = Sx + Y;
+                        Sy = Sy + X;
+                        Jx = Jx + Math.Pow(Y, 2);
+                        Jy = Jy + Math.Pow(X, 2);
+                        Jxy = Jxy + X * Y;
+                    }
+                }
+            }
+            //Obliczenie środka cieżkości
+            if (F > 0)
+            {
+                x0 = Sy / F;
+                y0 = Sx / F;
+                srodek_ciezkosci.X = (int)x0;
+                srodek_ciezkosci.Y = (int)y0;
+            }
+        }
+
+        private void Narysuj_wybrany_obiekt(int nr)
+        {
+            image_PB2.SetZero();
+            byte[,,] temp1 = image_PB1.Data;
+            byte[,,] temp2 = image_PB2.Data;
+
+            MCvScalar kolor = new MCvScalar();
+            //kolor.V0 = kolor_wypalenia.V0 + 8 + nr;
+           // kolor.V1 = kolor_wypalenia.V1 + 8 + nr;
+            //kolor.V2 = kolor_wypalenia.V2 + 8 + nr;
+
+            kolor.V0 = kolor_wypalenia.V0 + nr;
+            kolor.V1 = kolor_wypalenia.V1 + nr;
+            kolor.V2 = kolor_wypalenia.V2 + nr;
+
+            for (int y = 1; y < desired_image_size.Height - 2; y++)
+            {
+                for (int x = 1; x < desired_image_size.Width - 2; x++)
+                {
+                    if (temp1[y, x, 0] == kolor.V0 && temp1[y, x, 1] == kolor.V1 && temp1[y, x, 2] == kolor.V2)
+                    {
+                        temp2[y, x, 0] = 0xff;
+                        temp2[y, x, 1] = 0xff;
+                        temp2[y, x, 2] = 0xff;
+                    }
+                }
+            }
+
+            image_PB2.Data = temp2;
+            pictureBox2.Image = image_PB2.Bitmap;
+        }
+
+        #endregion
 
 
         #region Wyznaczanie i rysowanie sygnatury
@@ -613,6 +884,11 @@ namespace SW_T7
             parametry_filtru.radius_minmax = (int)numericUpDown_Filter_width.Value;
             parametry_filtru.isMax = radioButton_Max.Checked;
             parametry_filtru.binary_thresh = tabela_wartosci_srednich;
+        }
+
+        private void pictureBox2_Click(object sender, EventArgs e)
+        {
+
         }
 
         private void refresh_GUI_settings()
